@@ -1,10 +1,12 @@
 check_SCRIPTS =
 TESTS = $(check_SCRIPTS)
 
+if KERNEL_TESTS
 check_SCRIPTS += fsverity.test portable_signatures.test mmap_check.test \
 		 evm_hmac.test non_action_rule_flags.test
 
 check_PROGRAMS := test_mmap
+endif
 
 .PHONY: check_logs
 check_logs:
