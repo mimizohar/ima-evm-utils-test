@@ -19,15 +19,11 @@ jobs:
           count=$(git rev-list --count ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} )
           echo "checkpatch event: ${{ github.event_name }} count: $count"
           git format-patch -$count ${{ github.event.pull_request.head.sha }} -o patches/
-        else
-          echo "checkpatch event: ${{ github.event_name }} forced: ${{ github.event.forced }}"
-          for commit in ${{ join(github.event.commits.*.id, ' ') }}; do
-              git format-patch -1 $commit -o patches/
-          done
+          scripts/checkpatch.pl patches/*  --strict --terse  --no-tree --ignore CONST_STRUCT,VOLATILE,SPLIT_STRING,FILE_PATH_CHANGES
         fi
-        scripts/checkpatch.pl patches/*  --strict --terse  --no-tree --ignore CONST_STRUCT,VOLATILE,SPLIT_STRING,FILE_PATH_CHANGES
 
   build:
+    if: ${{ github.event_name }} == 'pull_request'
     needs: review
     runs-on: ubuntu-latest
     outputs:
