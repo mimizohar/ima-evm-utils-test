@@ -52,6 +52,7 @@
 #include "hash_info.h"
 #include "pcr.h"
 #include "utils.h"
+#include "evm_json.h"
 
 #ifndef XATTR_APPAARMOR_SUFFIX
 #define XATTR_APPARMOR_SUFFIX "apparmor"
@@ -119,7 +120,11 @@ static dev_t fs_dev;
 static bool evm_portable;
 static bool veritysig;
 static bool hwtpm;
-static char *g_hash_algo = DEFAULT_HASH_ALGO;
+
+char *g_hash_algo = DEFAULT_HASH_ALGO;
+char *g_evmfile = NULL;  /* for export, json file name */
+bool g_use_path = false; /* true uses the full path as the file name */
+
 static char *g_keypass;
 
 enum signature_version {
@@ -337,13 +342,27 @@ err:
 }
 
 /*
- * calc_evm_hash - calculate the file metadata hash
+ * evm_calc_evm_hash - calculate the file metadata hash
  *
- * Returns 0 for EVP_ function failures. Return -1 for other failures.
- * Return hash algorithm size on success.
+ * @file: String name of the file to be hashed
+ * @hash_algo: String hash algorithm
+ * @evm_hash: Output EVM hash
+ * @ima_hash: file data hash supplied by the caller
+ * @ima_hash_len:
+ *
+ * The metadata includes the extended attributes and the file data hash. If IMA
+ * hash is supplied on the command line, use it. Else if it's supplied by the
+ * caller, use it. Else use the extended attribute.
+ *
+ * Returns
+ *	0 for EVP_ function failures
+ *	-1 for other failures.
+ *	hash algorithm size on success.
  */
-static int calc_evm_hash(const char *file, const char *hash_algo,
-			 unsigned char *hash)
+int evm_calc_evm_hash(const char *file, const char *hash_algo,
+		      unsigned char *evm_hash,
+		      const unsigned char *ima_hash,
+		      size_t ima_hash_len)
 {
         const EVP_MD *md;
 	struct stat st;
@@ -438,6 +457,9 @@ static int calc_evm_hash(const char *file, const char *hash_algo,
 			}
 			strcpy(xattr_value, selinux_str);
 		} else if (!strcmp(*xattrname, XATTR_NAME_IMA) && ima_str) {
+			/* if the IMA hash is supplied as hexascii on the
+			 * command line
+			 */
 			len = strlen(ima_str) / 2;
 			if (len > sizeof(xattr_value)) {
 				log_err("ima[%zu] value is too long to fit into xattr[%zu]\n",
@@ -445,8 +467,19 @@ static int calc_evm_hash(const char *file, const char *hash_algo,
 				err = -1;
 				goto out;
 			}
-			hex2bin(xattr_value, ima_str, err);
+			hex2bin(xattr_value, ima_str, len);
+		} else if ((!strcmp(*xattrname, XATTR_NAME_IMA) && (ima_hash != NULL))) {
+			/* if the IMA hash is supplied by the caller */
+			if (ima_hash_len > sizeof(xattr_value)) {
+				log_err("ima[%zu] value is too long to fit into xattr[%zu]\n",
+					ima_hash_len, sizeof(xattr_value));
+				err = -1;
+				goto out;
+			}
+			len = ima_hash_len;
+			memcpy(xattr_value, ima_hash, len);
 		} else if (!strcmp(*xattrname, XATTR_NAME_IMA) && evm_portable){
+			/* else get the IMA hash from the extended attributes */
 			err = lgetxattr(file, xattr_ima, xattr_value,
 					sizeof(xattr_value));
 			if (err < 0) {
@@ -454,6 +487,7 @@ static int calc_evm_hash(const char *file, const char *hash_algo,
 					xattr_ima);
 				goto out;
 			}
+			len = (size_t)err;
 			use_xattr_ima = 1;
 		} else if (!strcmp(*xattrname, XATTR_NAME_CAPS) && (hmac_flags & HMAC_FLAG_CAPS_SET)) {
 			if (!caps_str)
@@ -476,12 +510,13 @@ static int calc_evm_hash(const char *file, const char *hash_algo,
 				log_info("skipping xattr: %s\n", *xattrname);
 				continue;
 			}
+                        len = (size_t)err;
 		}
 		/*log_debug("name: %s, value: %s, size: %d\n", *xattrname, xattr_value, err);*/
 		log_info("name: %s, size: %d\n",
 			 use_xattr_ima ? xattr_ima : *xattrname, err);
 		log_debug_dump(xattr_value, err);
-		err = EVP_DigestUpdate(pctx, xattr_value, err);
+		err = EVP_DigestUpdate(pctx, xattr_value, len);
 		if (!err) {
 			log_err("EVP_DigestUpdate() failed\n");
 			goto out;
@@ -547,7 +582,7 @@ static int calc_evm_hash(const char *file, const char *hash_algo,
 		}
 	}
 
-	err = EVP_DigestFinal(pctx, hash, &mdlen);
+	err = EVP_DigestFinal(pctx, evm_hash, &mdlen);
 	if (!err)
 		log_err("EVP_DigestFinal() failed\n");
 
@@ -569,7 +604,7 @@ static int sign_evm(const char *file, char *hash_algo, const char *key)
 	size_t len;
 	int err;
 
-	err = calc_evm_hash(file, hash_algo, hash);
+	err = evm_calc_evm_hash(file, hash_algo, hash, NULL, 0);
 	if (err <= 1)
 		return err;
 	len = (size_t)err;
@@ -625,7 +660,7 @@ static int sign_evm(const char *file, char *hash_algo, const char *key)
 }
 
 /*
- * Create a hash of a file
+ * evm_hash_ima_common - create a hash of a file
  *
  * @file: String name of the file to be hashed
  * @hash_algo: String hash algorithm
@@ -647,9 +682,9 @@ static int sign_evm(const char *file, char *hash_algo, const char *key)
  *	1 unsupported hash algorithm
  *	0 success
  */
-static int hash_ima_common(const char *file,
-			   const char *hash_algo,
-			   unsigned char *hash_out, size_t *len)
+int evm_hash_ima_common(const char *file,
+			const char *hash_algo,
+			unsigned char *hash_out, size_t *len)
 {
 	int err, offset;
 	/* +2 byte xattr header */
@@ -707,7 +742,7 @@ static int hash_ima(const char *file)
 	size_t len;
 	int err;
 
-	err = hash_ima_common(file, g_hash_algo, NULL, &len);
+	err = evm_hash_ima_common(file, g_hash_algo, NULL, &len);
 	return err;
 }
 
@@ -800,7 +835,7 @@ static int get_file_type(const char *path, const char *search_type)
 	return dts;
 }
 
-static int do_cmd(struct command *cmd, find_cb_t func)
+int do_cmd(struct command *cmd, find_cb_t func)
 {
 	char *path = g_argv[optind++];
 	int err, dts = REG_MASK; /* only regular files by default */
@@ -1048,7 +1083,7 @@ static int verify_evm(struct public_key_entry *public_keys, const char *file)
 	}
 	hash_algo = imaevm_hash_algo_by_id(sig_hash_algo);
 
-	mdlen = calc_evm_hash(file, hash_algo, hash);
+	mdlen = evm_calc_evm_hash(file, hash_algo, hash, NULL, 0);
 	if (mdlen <= 1)
 		return mdlen;
 	assert(mdlen <= (int)sizeof(hash));
@@ -1627,10 +1662,54 @@ static int find(const char *path, int dts, find_cb_t func)
 		if (!strcmp(de->d_name, "..") || !strcmp(de->d_name, "."))
 			continue;
 		log_debug("path: %s, type: %u\n", de->d_name, de->d_type);
-		if (de->d_type == DT_DIR)
-			find(de->d_name, dts, func);
-		else if (dts & (1 << de->d_type))
-			func(de->d_name);
+		if (g_use_path) {       /* use the entire path name */
+			char directory_path[PATH_MAX];
+			size_t plen = strlen(path);
+			size_t flen = strlen(de->d_name);
+
+			if (plen >= PATH_MAX) {
+				log_err("Path %s too long\n", path);
+				return -1;
+			}
+			sprintf(directory_path, "%s", path);
+			/*
+			 * if the entry is a subdirectory, append the entry and
+			 * recurse
+			 */
+			if (de->d_type == DT_DIR) {
+				if ((plen + 1 + flen) >= PATH_MAX) {
+					log_err("Path %s/%s too long\n",
+						path, de->d_name);
+					return -1;
+				}
+				sprintf(directory_path, "%s/%s",
+					path, de->d_name);
+				log_debug("full directory path: %s\n",
+					  directory_path);
+				find(directory_path, dts, func);
+			}
+			/*
+			 * if the entry is a file, prepend the directory and
+			 * process
+			 */
+			else if (dts & (1 << de->d_type)) {
+				char file_path[PATH_MAX * 2];
+
+				if ((plen + 1 + flen) >= (PATH_MAX * 2)) {
+					log_err("Path %s/%s too long\n",
+						path, de->d_name);
+					return -1;
+				}
+				sprintf(file_path, "%s/%s",
+					directory_path, de->d_name);
+				func(file_path);
+			}
+		} else {	/* use only the file name */
+			if (de->d_type == DT_DIR)
+				find(de->d_name, dts, func);
+			else if (dts & (1 << de->d_type))
+				func(de->d_name);
+		}
 	}
 
 	if (chdir("..")) {
@@ -2998,6 +3077,21 @@ static int cmd_ima_bootaggr(struct command *cmd __attribute__((unused)))
 	return 0;
 }
 
+static int cmd_export_evmhash(struct command *cmd)
+{
+	int err;
+
+	if (g_evmfile == NULL) {
+		log_err("--evmfile parameter missing\n");
+		print_usage(cmd);
+		return -1;
+	}
+	err = evm_export_evmhash(cmd,
+				 g_evmfile,
+				 g_hash_algo);
+	return err;
+}
+
 static void print_usage(struct command *cmd)
 {
 	printf("usage: %s %s\n", cmd->name, cmd->arg ? cmd->arg : "");
@@ -3083,6 +3177,7 @@ static void usage(void)
 		"      --keyid-from-cert file\n"
 		"                     read keyid value from SKID of a x509 cert file\n"
 		"  -o, --portable     generate portable EVM signatures\n"
+		"  -e, --evmfile      for export, the output json file name\n"
 		"  -p, --pass         password for encrypted signing; use -p<password>\n"
 		"  -r, --recursive    recurse into directories (sign)\n"
 		"  -t, --type         file types to fix 'fxm' (f: file)\n"
@@ -3144,6 +3239,7 @@ struct command cmds[] = {
 	{"ima_clear", cmd_ima_clear, 0, "[-t fdsxm] path", "Recursively remove IMA/EVM xattrs.\n"},
 	{"sign_hash", cmd_sign_hash, 0, "[--veritysig] [--key key] [--pass[=<password>]]", "Sign hashes from either shaXsum or \"fsverity digest\" output.\n"},
 	{"hmac", cmd_hmac_evm, 0, "[--imahash | --imasig] [--hmackey key] file", "Sign file metadata with HMAC using symmetric key (for testing purpose).\n"},
+	{"export_evmhash", cmd_export_evmhash, 0, "--evmfile file", "Export the EVM hash to a json file.\n"},
 	{0, 0, 0, NULL, ""}
 };
 
@@ -3162,6 +3258,7 @@ static struct option opts[] = {
 	{"m32", 0, 0, '3'},
 	{"m64", 0, 0, '6'},
 	{"portable", 0, 0, 'o'},
+	{"evmfile", 1, 0, 'e'},
 	{"smack", 0, 0, 128},
 	{"version", 0, 0, 129},
 	{"inode", 1, 0, 130},
@@ -3326,7 +3423,7 @@ int main(int argc, char *argv[])
 	g_argc = argc;
 
 	while (1) {
-		c = getopt_long(argc, argv, "hvnsda:op::fu::k:t:r", opts, &lind);
+		c = getopt_long(argc, argv, "hvnsda:e:op::fu::k:t:r", opts, &lind);
 		if (c == -1)
 			break;
 
@@ -3382,6 +3479,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'o':
 			evm_portable = true;
+			break;
+		case 'e':
+			g_evmfile = optarg;
 			break;
 		case 't':
 			search_type = optarg;
