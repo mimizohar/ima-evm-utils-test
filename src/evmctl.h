@@ -15,8 +15,6 @@
 
 #include <stdbool.h>
 
-extern bool g_use_path;
-
 struct command {
 	char *name;
 	int (*func)(struct command *cmd);

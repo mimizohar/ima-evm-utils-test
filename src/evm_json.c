@@ -13,14 +13,16 @@
 #include <string.h>
 #include <stdio.h>
 
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+
+#include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+
 #include "evm_json.h"
-
-static const char *s_hash_algo = NULL;
-static const char *s_evmfile = NULL;
-
-static int bin2json(json_object *json_object,
-		    const char *infile,
-		    const unsigned char *data, size_t len);
+#include "utils.h"
 
 /*
  * Define USE_FPRINTF before the below include.  Otherwise logging goes to
@@ -28,6 +30,9 @@ static int bin2json(json_object *json_object,
  */
 #define USE_FPRINTF
 #include "imaevm.h"
+
+static const char *s_hash_algo = NULL;
+static const char *s_evmfile = NULL;
 
 /*
  * bin2hexascii - write the binary 'data' of length 'len' to 'string'
@@ -103,6 +108,99 @@ static int bin2json(json_object *json_object,
 			       json_object_new_string(string));
  out:
 	free(string);	/* @1*/
+	return err;
+}
+
+/*
+ * read_file - read a file into 'buffer' of 'length'.
+ *
+ * @buffer: output, contents of the file plus NUL terminator
+ * @length: output, length of string
+ * @filename: input, name of file to be read
+
+ * 'buffer' must be NULL on entry (to prevent memory leaks) and must be freed by
+ * the caller. The call adds the NUL terminator.
+ *
+ * Returns:
+ *	0 success
+ *	-1 error
+ */
+static int read_file(char **buffer,     /* must be freed by the caller */
+		     size_t *length,
+		     const char *filename)
+{
+	int err = 0;
+	int irc = 0;
+	ssize_t	src = 0;
+	int fd = -1;
+	struct stat st;
+
+	if (*buffer != NULL) {
+		log_err("*buffer is not NULL\n");
+		err = -1;
+		goto out;
+	}
+	fd = open(filename, O_RDONLY);	/* closed @1 */
+	if (fd == -1) {
+		log_err("File %s open for read failed\n", filename);
+		err = -1;
+		goto out;
+	}
+	irc = fstat(fd, &st);
+	if (irc == -1) {
+		log_err("File %s fstat failed\n", filename);
+		err = -1;
+		goto out;
+	}
+	if (st.st_size < 0) {
+		log_err("File %s fstat returned negative size\n", filename);
+		err = -1;
+		goto out;
+	}
+	if (st.st_size > (SIZE_MAX - 1)) {
+		log_err("File %s fstat returned size greater that SIZE_MAX\n",
+			filename);
+		err = -1;
+		goto out;
+	}
+	*length = (size_t)st.st_size;
+	if (*length == 0) {
+		log_err("Filename %s length 0\n", filename);
+		err = -1;
+		goto out;
+	}
+	*buffer = malloc((*length) + 1);	/* freed by caller */
+	if (*buffer == NULL) {
+		log_err("Allocating %zu bytes\n", *length);
+		err = -1;
+		goto out;
+	}
+	src = read(fd, *buffer, *length);
+	if (src <= 0) {
+		log_err("read %s\n", filename);
+		err = -1;
+		goto out;
+	} else {
+		if ((size_t)src != *length) {
+			log_err("Reading %s, %zu bytes, got %zu\n",
+				filename, *length, (size_t)src);
+			err = -1;
+			goto out;
+		}
+	}
+	(*buffer)[*length] = '\0';		/* NUL terminate */
+ out:
+	if (fd != -1) {
+		irc = close(fd);		/* @1 */
+		if (irc == -1) {
+			log_err("Closing %s\n", filename);
+			err = -1;
+		}
+	}
+	if (err) {
+		free(*buffer);
+		*buffer = NULL;
+	}
 	return err;
 }
 
@@ -187,7 +285,6 @@ int evm_export_evmhash(struct command *cmd,
 	size_t len;		/* length of serialized json record */
 	FILE *outfile = NULL;	/* the export output json file */
 
-	g_use_path = true;
 	if (evmfile == NULL) {
 		log_err("missing export json file name\n");
 		err = -1;
@@ -254,3 +351,198 @@ int evm_export_evmhash(struct command *cmd,
 	return err;
 }
 
+/*
+ * evm_sign_exported_evmhash - sign a file of hashes in json format
+ *
+ * @cmd: pointer to a CLI command structure
+ * @hash_algo: signing hash algorithm string
+ * @keyfile: signing key in pem format
+ * @infile: string json input file of hashes
+ * @outfile: string json output file of signatures
+ *
+ * This is the callback for the sign_exported_evmhash command.
+ *
+ * evm_sign_exported_evmhash reads the json file of hashes, iterates through
+ * each file name (the json key), reads the hash (the json value), and signs the
+ * hash with the private key. It writes the json file of file names (the json
+ * key) and signatures (the json value).
+ *
+ * The hash algorithm is taken from the --hashalgo argument.
+ * The signing private key is taken from the --key argument.
+ * The hash file is taken from the --infile argument.
+ * The signature file is taken from the --outfile argument.
+ *
+ * Returns:
+ *
+ *	0 success
+ *	-1 error
+ */
+int evm_sign_exported_evmhash(struct command *cmd __attribute__((unused)),
+			      const char *hash_algo,
+			      const char *keyfile,
+			      const char *infile,
+			      const char *outfilename)
+{
+	int err = 0;
+	char *buffer = NULL;
+	size_t length = 0;
+	json_object *root = NULL;		/* input */
+	json_type type;
+	json_object *out_json_object = NULL;    /* for output */
+	unsigned char digest[MAX_DIGEST_SIZE];	/* binary digest */
+	size_t digestlen;			/* length of binary */
+	size_t digeststrlen;			/* length of string */
+	unsigned char *signature = NULL;
+	size_t siglen;
+	EVP_PKEY *pkey = NULL;
+	FILE *fp = NULL;
+	FILE *outfile = NULL;
+	const char *json_string = NULL;
+	size_t len;
+	/*
+	 * read the private key
+	 */
+	fp = fopen(keyfile, "r");	/* closed @1 */
+	if (fp == NULL) {
+		log_err("Failed to open keyfile: %s\n", keyfile);
+		err = -1;
+		goto out;
+	}
+	pkey = PEM_read_PrivateKey(fp, NULL, NULL, NULL);	/* freed @2 */
+	if (pkey == NULL) {
+		log_err("Failed to read keyfile: %s\n", keyfile);
+		err = -1;
+		goto out;
+	}
+	/*
+	 * read the json hash file
+	 */
+	/* read the json file to a NUL terminated string */
+	err = read_file(&buffer,	      /* freed @3 */
+			&length,
+			infile);
+	if (err != 0)
+		goto out;
+	log_debug("json contents:\n%s\n", buffer);
+	/* parse the import string to a json object */
+	root = json_tokener_parse(buffer);	/* freed @4 */
+	if (root == NULL) {
+		log_err("Input file %s parse failed\n", infile);
+		err = -1;
+		goto out;
+	}
+	type = json_object_get_type(root);
+	if (type != json_type_object) {
+		log_err("Input file %s parse type failed\n", infile);
+		err = -1;
+		goto out;
+	}
+	out_json_object = json_object_new_object();       /* freed @5 */
+	if (out_json_object == NULL) {
+		log_err("Could not allocate json object for %s\n", outfilename);
+		err = -1;
+		goto out;
+	}
+	/* for each key (file name) / value (hash) pair */
+	json_object_object_foreach(root,
+				   filename,		/* key char * */
+				   json_hash) {		/* json object * */
+		const char *hash_string = NULL;
+
+		log_debug("Filename: %s\n", filename);
+		/* get the value (hash) associated with the key (file
+		 * name)
+		 */
+		hash_string = json_object_get_string(json_hash);
+		log_debug("Hash: %s\n", hash_string);
+
+		digeststrlen = strlen(hash_string);
+		if ((digeststrlen % 2) != 0) {
+			log_err("hash string length is odd\n");
+			err = -1;
+			goto out;
+		}
+		digestlen = digeststrlen / 2;
+		if (digestlen > sizeof(digest)) {
+			log_err("hash is too large\n");
+			err = -1;
+			goto out;
+		}
+		err = hex2bin(digest, hash_string, digestlen);
+		if (err != 0) {
+			log_err("File hash is not hexascii %s\n",
+				hash_string);
+			err = -1;
+			goto out;
+		}
+		log_debug("Binary hash\n");
+		log_dump(digest, digestlen);
+		err = imaevm_sign_hash_raw(hash_algo,
+					   pkey,
+					   digest,
+					   digestlen,
+					   &signature,	/* freed @7 */
+					   &siglen);
+		if (err != 0) {
+			log_err("imaevm_sign_hash_raw() failed\n");
+			err = -1;
+			goto out;
+		}
+		err = bin2json(out_json_object,
+			       filename,		/* key */
+			       signature, siglen);	/* value */
+		free(signature);	/* @1 */
+		signature = NULL;
+		if (err != 0) {
+			log_err("bin2json() failed\n");
+			err = -1;
+			goto out;
+		}
+	}
+	/* convert the json object to a string */
+	json_string = json_object_to_json_string_ext(out_json_object,
+						     JSON_C_TO_STRING_PRETTY);
+	if (json_string == NULL) {
+		log_err("Could not convert json object to string\n");
+		err = -1;
+		goto out;
+	}
+	len = strlen(json_string);
+	if (len == 0) {
+		log_err("json object is zero length\n");
+		err = -1;
+		goto out;
+	}
+	log_info("%s\n", json_string);
+	outfile = fopen(outfilename, "w");	/* closed @6 */
+	if (outfile == NULL) {
+		log_err("output file %s open failed\n", outfilename);
+		err = -1;
+		goto out;
+	}
+	err = fwrite(json_string, len, 1, outfile);
+	if (err == 1) {		/* normal fwrite return */
+		err = 0;
+	} else {
+		err = -1;
+	}
+
+ out:
+	if (fp != NULL) {
+		fclose(fp);		/* @1 */
+	}
+	EVP_PKEY_free(pkey);		/* @2 */
+	free(buffer);			/* @3 */
+	if (root != NULL) {
+		json_object_put(root);	/* @4 */
+		root = NULL;
+	}
+	if (out_json_object != NULL) {
+		json_object_put(out_json_object); /* @5 */
+		out_json_object = NULL;
+	}
+	if (outfile != NULL) {
+		fclose(outfile);	/* @6 */
+	}
+	return err;
+}

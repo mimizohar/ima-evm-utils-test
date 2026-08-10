@@ -124,6 +124,8 @@ static bool hwtpm;
 char *g_hash_algo = DEFAULT_HASH_ALGO;
 char *g_evmfile = NULL;  /* for export, json file name */
 bool g_use_path = false; /* true uses the full path as the file name */
+char *g_infile = NULL;	/* for signing, the input hash file */
+char *g_outfile = NULL;	/* for signing, the output signature file */
 
 static char *g_keypass;
 
@@ -2038,7 +2040,7 @@ static struct tpm_bank_info *init_tpm_banks(int *num_banks)
 /*
  * Compare the calculated TPM PCR banks against the PCR values read.
  * The banks_mask parameter allows to select which banks to consider.
- * A banks_maks of 0x3 would consider banks 1 and 2, 0x2 would only
+ * A banks_mask of 0x3 would consider banks 1 and 2, 0x2 would only
  * consider the 2nd bank, ~0 would consider all banks.
  *
  * On failure to match any TPM bank, fail comparison.
@@ -3086,9 +3088,41 @@ static int cmd_export_evmhash(struct command *cmd)
 		print_usage(cmd);
 		return -1;
 	}
+	/*
+	 * the export function requires the full path in the output so that the
+	 * signature can be imported
+	 */
+	g_use_path = true;
 	err = evm_export_evmhash(cmd,
 				 g_evmfile,
 				 g_hash_algo);
+	return err;
+}
+
+static int cmd_sign_exported_evmhash(struct command *cmd)
+{
+	int err;
+
+	if (g_infile == NULL) {
+		log_err("--infile parameter missing\n");
+		print_usage(cmd);
+		return -1;
+	}
+	if (g_outfile == NULL) {
+		log_err("--outfile parameter missing\n");
+		print_usage(cmd);
+		return -1;
+	}
+	if (imaevm_params.keyfile == NULL) {
+		log_err("--key parameter missing\n");
+		print_usage(cmd);
+		return -1;
+	}
+	err = evm_sign_exported_evmhash(cmd,
+					g_hash_algo,
+					imaevm_params.keyfile,
+					g_infile,
+					g_outfile);
 	return err;
 }
 
@@ -3240,6 +3274,7 @@ struct command cmds[] = {
 	{"sign_hash", cmd_sign_hash, 0, "[--veritysig] [--key key] [--pass[=<password>]]", "Sign hashes from either shaXsum or \"fsverity digest\" output.\n"},
 	{"hmac", cmd_hmac_evm, 0, "[--imahash | --imasig] [--hmackey key] file", "Sign file metadata with HMAC using symmetric key (for testing purpose).\n"},
 	{"export_evmhash", cmd_export_evmhash, 0, "--evmfile file", "Export the EVM hash to a json file.\n"},
+	{"sign_exported_evmhash", cmd_sign_exported_evmhash, 0, "--infile hash.json --outfile sig.json --key key", "Sign the hashes.\n"},
 	{0, 0, 0, NULL, ""}
 };
 
@@ -3288,6 +3323,8 @@ static struct option opts[] = {
 	{"v2", 0, 0, 150},
 	{"v3", 0, 0, 151},
 	{"log-level", 1, 0, 152},
+	{"infile", 1, 0, 153},
+	{"outfile", 1, 0, 154},
 	{}
 
 };
@@ -3615,6 +3652,12 @@ int main(int argc, char *argv[])
 			}
 			version_chosen = true;
 			g_signature_version = SIGNATURE_V3;
+			break;
+		case 153:
+			g_infile = optarg;
+			break;
+		case 154:
+			g_outfile = optarg;
 			break;
 		case '?':
 			exit(1);
