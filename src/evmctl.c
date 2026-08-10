@@ -624,15 +624,46 @@ static int sign_evm(const char *file, char *hash_algo, const char *key)
 	return 0;
 }
 
-static int hash_ima(const char *file)
+/*
+ * Create a hash of a file
+ *
+ * @file: String name of the file to be hashed
+ * @hash_algo: String hash algorithm
+ * @hash_out: Pointer to a binary hash buffer; should be
+ *	MAX_DIGEST_SIZE + 2 bytes;
+ *	if NULL, the hash is calculated locally but not returned
+ * @len: Pointer to the returned hash size; it is returned even if hash_out
+ *	is NULL; returns 0 on error.
+ *
+ * Returns a digest over the file contents. The digest is prepended with 1-2
+ * bytes of description. The returned 'len' includes these bytes.
+ *
+ * If the global xattr is set, the digest is added to the file extended
+ * attributes.
+ *
+ * Returns:
+ *	-1 invalid hash algorithm, unsupported file type
+ *	<0 invalid file name
+ *	1 unsupported hash algorithm
+ *	0 success
+ */
+static int hash_ima_common(const char *file,
+			   const char *hash_algo,
+			   unsigned char *hash_out, size_t *len)
 {
-	unsigned char hash[MAX_DIGEST_SIZE + 2]; /* +2 byte xattr header */
 	int err, offset;
-	size_t len;
-	int algo = imaevm_get_hash_algo(g_hash_algo);
+	/* +2 byte xattr header */
+	unsigned char hash_local[MAX_DIGEST_SIZE + 2];
+	unsigned char *hash = hash_local;
+	int algo;
 
+	*len = 0;       /* for the error case */
+	if (hash_out != NULL) {
+		hash = hash_out;
+	}
+	algo = imaevm_get_hash_algo(hash_algo);
 	if (algo < 0) {
-		log_err("Unknown hash algo: %s\n", g_hash_algo);
+		log_err("Unknown hash algo: %s\n", hash_algo);
 		return -1;
 	}
 	if (algo > PKEY_HASH_SHA1) {
@@ -644,23 +675,22 @@ static int hash_ima(const char *file)
 		offset = 1;
 	}
 
-	err = ima_calc_hash2(file, g_hash_algo, hash + offset);
+	err = ima_calc_hash2(file, hash_algo, hash + offset);
 	if (err <= 1)
 		return err;
 
-	len = (size_t)err;
-	assert(len + offset <= sizeof(hash));
+	*len = (size_t)err;
+	//assert(len + offset <= sizeof(hash));
+	*len += offset;
 
-	len += offset;
-
-	if (imaevm_params.verbose >= LOG_INFO)
-		log_info("hash(%s): ", g_hash_algo);
+	//if (imaevm_params.verbose >= LOG_INFO)
+		log_info("file data hash(%s): ", hash_algo);
 
 	if (sigdump || imaevm_params.verbose >= LOG_INFO)
-		imaevm_hexdump(hash, len);
+		imaevm_hexdump(hash, *len);
 
 	if (xattr) {
-		err = lsetxattr(file, xattr_ima, hash, len, 0);
+		err = lsetxattr(file, xattr_ima, hash, *len, 0);
 		if (err < 0) {
 			log_errno_reset(LOG_ERR,
 					"Setting IMA hash xattr failed: %s",
@@ -670,6 +700,15 @@ static int hash_ima(const char *file)
 	}
 
 	return 0;
+}
+
+static int hash_ima(const char *file)
+{
+	size_t len;
+	int err;
+
+	err = hash_ima_common(file, g_hash_algo, NULL, &len);
+	return err;
 }
 
 static int sign_ima(const char *file, char *hash_algo, const char *key)
