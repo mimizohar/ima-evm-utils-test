@@ -739,6 +739,90 @@ int evm_hash_ima_common(const char *file,
 	return 0;
 }
 
+/*
+ * evm_add_evm_signature - adds the signaure to the file.
+ *
+ * @filename: a fully rooted path to a file
+ * @sig_string: a raw signature in hexascii
+ *	RSA: raw signature of digest
+ *	ECC: DER encoded sequence of R and S
+ *
+ * The hash algorithm is taken from g_hash_algo, the --hashalgo argument.
+ *
+ * The public key identifier is extracted from the X.509 certificate specified
+ * in the --keyid-from-cert (145) argument into the global imaevm_keyid
+ *
+ * Returns:
+ *	0 on success
+ *	-1 on error
+ */
+int evm_add_evm_signature(const char *filename, const char *sig_string)
+{
+	int err;
+	size_t len;
+	int algo = -1;
+	unsigned char sig_bin[MAX_SIGNATURE_SIZE];
+
+	if (imaevm_keyid == 0) {
+		log_err("Invalid keyid value from --keyid-from-cert.\n");
+		return -1;
+	}
+	len = strlen(sig_string) / 2;
+	/*
+	 * 9 represents the type, version, hash algorithm, public key
+	 * identifier, and signature size
+	 */
+	if ((len + 9) > sizeof(sig_bin)) {
+		log_err("file signature size too large %zu\n", len);
+		return -1;
+	}
+	/* the signature goes after the 9 byte header */
+	err = hex2bin(sig_bin + 9, sig_string, len);
+	if (err != 0) {
+		log_err("file signature is not hexascii %s\n",
+			sig_string);
+		return -1;
+	}
+	sig_bin[0] = EVM_XATTR_PORTABLE_DIGSIG;
+	sig_bin[1] = DIGSIG_VERSION_2;
+	algo = imaevm_get_hash_algo(g_hash_algo);
+	if (algo < 0) {
+		log_err("Unknown hash algo: %s\n", g_hash_algo);
+		return -1;
+	}
+	/* sanity check that the algorithm fits in one byte */
+	if (algo > 0xff) {
+		log_err("Illegal hash algorithm %d\n", algo);
+		return -1;
+	}
+	sig_bin[2] = (uint8_t)algo;
+	/* the public key identifier is inserted big endian */
+	sig_bin[3] = (uint8_t)((imaevm_keyid >> 24) & 0xff);
+	sig_bin[4] = (uint8_t)((imaevm_keyid >> 16) & 0xff);
+	sig_bin[5] = (uint8_t)((imaevm_keyid >>  8) & 0xff);
+	sig_bin[6] = (uint8_t)((imaevm_keyid >>  0) & 0xff);
+	/* big endian length of the signature */
+	sig_bin[7] = (uint8_t)((len >>  8) & 0xff);
+	sig_bin[8] = (uint8_t)((len >>  0) & 0xff);
+
+	log_debug("evm signature:\n");
+	log_dump(sig_bin, len + 9);
+
+	/* add the signature to the file, security.evm or user.evm */
+	if (xattr) {	/* global, default 1, -n sets to 0 */
+		/*
+		 * xattr_evm defaults to security.evm, -xattr-user sets to
+		 * user.evm
+		 */
+		err = lsetxattr(filename, xattr_evm, sig_bin, len + 9, 0);
+		if (err < 0) {
+			log_err("Setting EVM xattr failed: %s", filename);
+			return err;
+		}
+	}
+	return err;
+}
+
 static int hash_ima(const char *file)
 {
 	size_t len;
@@ -3126,6 +3210,20 @@ static int cmd_sign_exported_evmhash(struct command *cmd)
 	return err;
 }
 
+static int cmd_import_evmsig(struct command *cmd)
+{
+	int err;
+
+	if (g_evmfile == NULL) {
+		log_err("--evmfile parameter missing\n");
+		print_usage(cmd);
+		return -1;
+	}
+	err = evm_import_evmsig(cmd,
+				g_evmfile);
+	return err;
+}
+
 static void print_usage(struct command *cmd)
 {
 	printf("usage: %s %s\n", cmd->name, cmd->arg ? cmd->arg : "");
@@ -3275,6 +3373,7 @@ struct command cmds[] = {
 	{"hmac", cmd_hmac_evm, 0, "[--imahash | --imasig] [--hmackey key] file", "Sign file metadata with HMAC using symmetric key (for testing purpose).\n"},
 	{"export_evmhash", cmd_export_evmhash, 0, "--evmfile file", "Export the EVM hash to a json file.\n"},
 	{"sign_exported_evmhash", cmd_sign_exported_evmhash, 0, "--infile hash.json --outfile sig.json --key key", "Sign the hashes.\n"},
+	{"import_evmsig", cmd_import_evmsig, 0, "--evmfile file", "Import the EVM signatures from a json file.\n"},
 	{0, 0, 0, NULL, ""}
 };
 

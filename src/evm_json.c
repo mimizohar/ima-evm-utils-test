@@ -546,3 +546,74 @@ int evm_sign_exported_evmhash(struct command *cmd __attribute__((unused)),
 	}
 	return err;
 }
+
+/*
+ * evm_import_evmsig - import a file of signatures in json format
+ *
+ * @cmd: pointer to a CLI command structure
+ * @evmfile: string json input file of signatures
+ *
+ * evm_import_evmsig is the callback for the import_evmsig command.  It calls
+ * evm_add_evm_signature() to apply each signature to the file extended
+ * attributes.
+ *
+ * Returns:
+ *
+ *	-1 error
+ *	0 success
+ */
+int evm_import_evmsig(struct command *cmd,
+		      const char *evmfile)
+{
+	int err = 0;
+	char *buffer = NULL;
+	size_t length = 0;
+	json_object *root = NULL;
+	json_type type;
+
+	/* read the json signature file */
+	err = read_file(&buffer,		/* freed @1 */
+			&length,
+			evmfile);
+	if (err != 0)
+		goto out;
+	log_debug("json contents:\n%s\n", buffer);
+
+	/* parse the import string to a json object */
+	root = json_tokener_parse(buffer);		/* freed @2 */
+	if (root == NULL) {
+		log_err("input file %s parse failed\n", evmfile);
+		err = -1;
+		goto out;
+	}
+	type = json_object_get_type(root);
+	if (type != json_type_object) {
+		log_err("input file %s parse type failed\n", evmfile);
+		err = -1;
+		goto out;
+	}
+	/*
+	 * for each key / value pair, store the signature associated with the
+	 * file as an extended attribute
+	 */
+	json_object_object_foreach(root,
+				   filename,		/* key char * */
+				   json_sig) {		/* json object * */
+		/*
+		 * get the value (signature) associated with the key (file name)
+		 */
+		const char *sig_string = json_object_get_string(json_sig);
+
+		log_debug("filename: %s\n", filename);
+		log_debug("raw signature: %s\n", sig_string);
+		err = evm_add_evm_signature(filename, sig_string);
+	}
+	/* cleanup, whether or not there is an error */
+ out:
+	if (root != NULL) {
+		json_object_put(root);	/* @2 */
+		root = NULL;
+	}
+	free(buffer);			/* @1 */
+	return err;
+}

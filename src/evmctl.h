@@ -33,5 +33,6 @@ int evm_calc_evm_hash(const char *file, const char *hash_algo,
 		      unsigned char *evm_hash,
 		      const unsigned char *ima_hash,
 		      size_t ima_hash_len);
+int evm_add_evm_signature(const char *filename, const char *sig_string);
 
 #endif

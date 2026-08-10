@@ -27,6 +27,8 @@ int evm_sign_exported_evmhash(struct command *cmd __attribute__((unused)),
 			      const char *keyfile,
 			      const char *infile,
 			      const char *outfilename);
+int evm_import_evmsig(struct command *cmd,
+		      const char *evmfile);
 
 # else	/* no json */
 
@@ -48,6 +50,13 @@ static inline int evm_sign_exported_evmhash(struct command *cmd __attribute__((u
 					    const char *keyfile,
 					    const char *infile,
 					    const char *outfilename)
+{
+	log_err("json-c library isn't available\n");
+	return -1;
+}
+
+static inline int evm_import_evmsig(struct command *cmd,
+				    const char *evmfile)
 {
 	log_err("json-c library isn't available\n");
 	return -1;
