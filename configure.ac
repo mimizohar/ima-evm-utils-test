@@ -28,6 +28,10 @@ AC_SUBST(KERNEL_HEADERS)
 AC_CHECK_HEADER(unistd.h)
 AC_CHECK_HEADERS(openssl/conf.h)
 
+# json
+AC_CHECK_HEADERS(json-c/json.h, [], [AC_MSG_WARN([json-c/json.h header not found. You need the json-c development package.])], [[#define EVM_HAS_JSON]])
+AM_CONDITIONAL([USE_JSON], [test "x$ac_cv_header_json_c_json_h" = "xyes"])
+
 # Intel TSS
 AC_CHECK_LIB([tss2-esys], [Esys_Free])
 AC_CHECK_LIB([tss2-rc], [Tss2_RC_Decode])
@@ -114,4 +118,5 @@ echo    "       provider: $enable_provider"
 echo    "   kernel-tests: $enable_kerneltests"
 echo	"            doc: $have_doc"
 echo	"         pandoc: $have_pandoc"
+echo	"           json: $ac_cv_header_json_c_json_h"
 echo

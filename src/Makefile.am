@@ -56,6 +56,13 @@ if CONFIG_IMA_EVM_PROVIDER
 evmctl_CFLAGS += -DCONFIG_IMA_EVM_PROVIDER
 endif
 
+# JSON
+if USE_JSON
+ evmctl_CFLAGS += -DEVM_HAS_JSON
+ evmctl_SOURCES += evm_json.c
+ evmctl_LDADD += -ljson-c
+endif
+
 # USE_PCRTSS uses the Intel TSS
 if USE_PCRTSS
  evmctl_SOURCES += pcr_tss.c
