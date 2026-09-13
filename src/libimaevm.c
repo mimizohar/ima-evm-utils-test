@@ -1824,3 +1824,100 @@ static void libinit(void)
 	ERR_load_crypto_strings();
 #endif
 }
+
+/*
+ * imaevm_sign_hash_raw - perform a raw signing operation on a digest.
+ *
+ * @algo: Input digest algorithm string
+ * @pkey: Input EVP_PKEY private key
+ * @digest: Input binary digest to be signed
+ * @digest_length: Input digest length
+ * @signature: Output binary signature
+ * @siglen: Output signature length
+ *
+ * 'signature'must be NULL on entry (to prevent memory leaks) and must be freed
+ * by the caller.
+ *
+ * imaevm_sign_hash_raw does not prepend any IMA/EVM specific information. RSA
+ * keys use PKCS1 padding
+ *
+ * Returns:
+ *	0 success
+ *	-1 error
+ */
+int imaevm_sign_hash_raw(const char *algo,
+			 EVP_PKEY *pkey,
+			 const unsigned char *digest,
+			 size_t digest_length,
+			 unsigned char **signature,	/* freed by caller */
+			 size_t *siglen)
+{
+	int		err = 0;
+	int		irc;
+	const char	*st = NULL;
+	EVP_PKEY_CTX	*ctx = NULL;
+	const EVP_MD	*md = NULL;
+
+	log_debug("digest\n");
+	log_dump(digest, digest_length);
+	st = "imaevm_sign_hash_raw";
+	if (*signature != NULL)	{ /* check for memory leak */
+		err = -1;
+		goto err;
+	}
+	st = "EVP_PKEY_CTX_new";
+	ctx = EVP_PKEY_CTX_new(pkey, NULL);	/* freed @1 */
+	if (ctx == NULL) {
+		err = -1;
+		goto err;
+	}
+	st = "EVP_PKEY_sign_init";
+	irc = EVP_PKEY_sign_init(ctx);
+	if (irc != 1) {
+		err = -1;
+		goto err;
+	}
+	st = "EVP_get_digestbyname";
+	md = EVP_get_digestbyname(algo);
+	if (md == NULL) {
+		err = -1;
+		goto err;
+	}
+	st = "EVP_PKEY_CTX_set_signature_md";
+	irc = EVP_PKEY_CTX_set_signature_md(ctx, md);
+	if (irc != 1) {
+		err = -1;
+		goto err;
+	}
+	st = "EVP_PKEY_sign";
+	/* determine buffer length */
+	irc = EVP_PKEY_sign(ctx, NULL, siglen, digest, digest_length);
+	if (irc != 1) {
+		err = -1;
+		goto err;
+	}
+	st = "malloc";
+	*signature = malloc(*siglen);
+	if (*signature == NULL) {
+		err = -1;
+		goto err;
+	}
+	st = "EVP_PKEY_sign";
+	irc = EVP_PKEY_sign(ctx, *signature, siglen, digest, digest_length);
+	if (irc != 1) {
+		err = -1;
+		goto err;
+	}
+	log_debug("imaevm_sign_hash_raw: siglen %zu\n", *siglen);
+	log_debug("imaevm_sign_hash_raw: signature\n");
+	log_dump(*signature, *siglen);
+
+ err:
+	if (err != 0) {
+		log_err("signing failed: (%s) in %s\n",
+			ERR_reason_error_string(ERR_peek_error()), st);
+		output_openssl_errors();
+	}
+	EVP_PKEY_CTX_free(ctx);		/* @1 */
+	return err;
+}

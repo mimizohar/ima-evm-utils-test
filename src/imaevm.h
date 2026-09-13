@@ -293,5 +293,11 @@ int imaevm_create_sigv3(const char *hash_algo, const unsigned char *hash, int si
 			enum evm_ima_xattr_type xattr_type,
 			const struct imaevm_ossl_access *access_info,
 			uint32_t keyid);
+int imaevm_sign_hash_raw(const char *algo,
+			 EVP_PKEY *pkey,
+			 const unsigned char *digest,
+			 size_t digest_length,
+			 unsigned char **signature,
+			 size_t *siglen);
 
 #endif
