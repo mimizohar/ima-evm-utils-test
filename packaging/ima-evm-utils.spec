@@ -1,10 +1,10 @@
 Name:		ima-evm-utils
-Version:	1.6.2
+Version:	1.7
 Release:	1%{?dist}
 Summary:	ima-evm-utils - IMA/EVM control utility
 Group:		System/Libraries
 License:	GPLv2
-#URL:		
+#URL:
 Source0:	%{name}-%{version}.tar.gz
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root
 
