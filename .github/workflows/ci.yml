@@ -15,23 +15,21 @@ jobs:
     - name: run checkpatch
       id: run_checkpatch
       run: |
-        count=0
-        if [ ${{ github.event_name }} == 'pull_request' ]; then
-          count=$(git rev-list --count ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} )
-          echo "checkpatch event: ${{ github.event_name }} count: $count"
-          git format-patch -$count ${{ github.event.pull_request.head.sha }} -o patches/
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          base=${{ github.event.pull_request.base.sha }}
+          head=${{ github.event.pull_request.head.sha }}
         else
-          echo "checkpatch event: ${{ github.event_name }} forced: ${{ github.event.forced }}"
-          for commit in ${{ join(github.event.commits.*.id, ' ') }}; do
-              git format-patch -1 $commit -o patches/
-              count=$((count + 1))
-          done
+          head=${{ github.sha }}
+          base=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "$head")
         fi
 
+        count=$(git rev-list --count "$base..$head")
+        echo "checkpatch event: ${{ github.event_name }}, forced: ${{ github.event.forced }}, range: $base..$head, count: $count"
         if [ "$count" -eq 0 ]; then
           exit 0
         fi
-        scripts/checkpatch.pl patches/*  --strict --terse  --no-tree --ignore CONST_STRUCT,VOLATILE,SPLIT_STRING,FILE_PATH_CHANGES,EXECUTE_PERMISSIONS,UNKNOWN_COMMIT_ID,BAD_SIGN_OFF,PREFER_DEFINED_ATTRIBUTE_MACRO,PREFER_KERNEL_TYPES,EMBEDDED_FUNCTION_NAME,CAMELCASE
+        git format-patch "$base..$head" -o patches/
+        scripts/checkpatch.pl patches/* --strict --terse --no-tree --ignore CONST_STRUCT,VOLATILE,SPLIT_STRING,FILE_PATH_CHANGES,EXECUTE_PERMISSIONS,UNKNOWN_COMMIT_ID,BAD_SIGN_OFF,PREFER_DEFINED_ATTRIBUTE_MACRO,PREFER_KERNEL_TYPES,EMBEDDED_FUNCTION_NAME,CAMELCASE
 
   build:
     needs: review
