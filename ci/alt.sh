@@ -3,6 +3,11 @@
 #
 # Install build env for ALT Linux
 
+# Dynamically switch from the stalled primary server to the Yandex mirror
+OLD_URL="http://altlinux.org"
+NEW_URL="http://yandex.ru"
+
+sed -i "s|$OLD_URL|$NEW_URL|g" /etc/apt/sources.list.d/*.list
 apt-get update -y
 
 # rpm-build brings basic build environment with gcc, make, autotools, etc.
